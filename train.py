@@ -4,13 +4,11 @@ import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
 from tensorflow.python.ops import math_ops
-from tensorflow.python.framework.errors_impl import OutOfRangeError
 
 from model import SRResNet
 from model import SRGAN_discriminator
 from model import srresnet_preprocess
 from model import srresnet_postprocess
-
 
 
 def parse_record(record):
@@ -66,12 +64,24 @@ def evalue(datapath):
         IPython.embed()
 
 
+def get_psnr_from_mse(mse, max_val, name='psnr'):
+    psnr = math_ops.subtract(
+        20 * math_ops.log(max_val) / math_ops.log(10.0),
+        np.float32(10 / np.log(10)) * math_ops.log(mse),
+        name=name)
+    return psnr
+
+
 def main():
     parser = argparse.ArgumentParser(description='train SRGAN')
     parser.add_argument('--datapath', type=str, required=True, help='location of SR dataset tfrecords')
     parser.add_argument('--model_dir', type=str, default='/tmp/SRResNet', help='directory to save model')
     parser.add_argument('--evalue', action='store_true', help='evalue model')
     parser.add_argument('--bs', type=int, default=64, help='batch size')
+    parser.add_argument('--repeat', type=int, default=10, help='train repeat time')
+    parser.add_argument('--epoch', type=int, default=100, help='epochs')
+    parser.add_argument('--lr', type=float, default=0.00001, help='learning rate')
+    parser.add_argument('--gan', action='store_true', help='using gan')
 
     args = parser.parse_args()
 
@@ -80,11 +90,19 @@ def main():
     if args.evalue:
         return evalue()
 
-    train_dataset = get_dataset(args.datapath, 'train')  # .shuffle(1000)
+    train_dataset = get_dataset(args.datapath, 'train').repeat(count=args.repeat)  # .shuffle(1000)
     train_dataset = train_dataset.batch(batch_size).prefetch(2)
-    train_iterator = train_dataset.make_initializable_iterator()
 
-    hr_images, lr_images = train_iterator.get_next()
+    valid_dataset = get_dataset(args.datapath, 'validation')
+    valid_dataset = valid_dataset.batch(batch_size).prefetch(2)
+
+    handle = tf.placeholder(tf.string, shape=[])
+    iterator = tf.data.Iterator.from_string_handle(
+        handle, train_dataset.output_types, train_dataset.output_shapes)
+    hr_images, lr_images = iterator.get_next()
+
+    train_iterator = train_dataset.make_initializable_iterator()
+    valid_iterator = valid_dataset.make_initializable_iterator()
 
     # build graph
 
@@ -102,27 +120,42 @@ def main():
     d_logits_real, _ = SRGAN_discriminator(hr_images, training=True, reuse=True)
 
     # loss to train discriminator
-    d_loss_fake = tf.nn.sigmoid_cross_entropy_with_logits(
+    d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
         labels=tf.zeros_like(d_logits_fake), logits=d_logits_fake,
         name='d_loss_fake'
-    )
-    d_loss_real = tf.nn.sigmoid_cross_entropy_with_logits(
+    ))
+    d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
         labels=tf.ones_like(d_logits_real), logits=d_logits_real,
         name='d_loss_real'
-    )
+    ))
 
     d_loss = d_loss_fake + d_loss_real
 
     # loss to train SRResNet
     g_mse_loss = tf.losses.mean_squared_error(labels=hr_images, predictions=sr_images)
 
-    g_gan_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+    g_gan_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
         # we want gentrator generate images that looks realistic
         # so labels = 1
         labels=tf.ones_like(d_logits_fake), logits=d_logits_fake,
         name='g_gan_loss'
-    )
+    ))
     g_loss = g_mse_loss + 0.001 * g_gan_loss
+
+    # lr
+    lr_all = tf.constant(args.lr, dtype=tf.float32)
+
+    # summary
+    # currnet_bs = tf.shape(lr_images)[0]  # this batch size
+    # metric_g_mse_loss = tf.metric.mean(g_mse_loss, weights=currnet_bs)
+    # metric_psnr = tf.metric.mean(, weights=currnet_bs)
+    psnr = get_psnr_from_mse(g_mse_loss, 2.0)
+    tf.summary.scalar('mse_loss', g_mse_loss, collections=['gan', 'train', 'valid'])
+    tf.summary.scalar('psnr', psnr, collections=['gan', 'train', 'valid'])
+    tf.summary.scalar('lr', lr_all, collections=['gan', 'train'])
+    tf.summary.scalar('g_gan_loss', g_gan_loss, collections=['gan'])
+    tf.summary.scalar('g_loss', g_loss, collections=['gan'])
+    tf.summary.scalar('d_loss', d_loss, collections=['gan'])
 
     # varlist
     g_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='SRResNet')
@@ -131,44 +164,101 @@ def main():
     g_train_op = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='SRResNet')
     d_train_op = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='SRGAN_D')
 
-    # optimize
-    lr_all = tf.constant(0.00001, dtype=tf.float32)
-    p_optim = tf.train.AdamOptimizer(lr_all, beta1=0.9).minimize(g_mse_loss, var_list=g_vars)
-    g_optim = tf.train.AdamOptimizer(lr_all, beta1=0.9).minimize(g_loss, var_list=g_vars)
-    d_optim = tf.train.AdamOptimizer(lr_all, beta1=0.9).minimize(d_loss, var_list=d_vars)
+    # global_step
+    global_step = tf.train.get_or_create_global_step()
 
-    saver = tf.train.Saver()
+    # optimize
+    p_optim = tf.train.AdamOptimizer(lr_all).minimize(g_mse_loss, var_list=g_vars, global_step=global_step)
+    g_optim = tf.train.AdamOptimizer(lr_all).minimize(g_loss, var_list=g_vars, global_step=global_step)
+    d_optim = tf.train.AdamOptimizer(lr_all).minimize(d_loss, var_list=d_vars, global_step=global_step)
+
+    p_train_op.append(p_optim)
+    g_train_op.append(g_optim)
+    d_train_op.append(d_optim)
+
+    p_train_op = tf.group(*p_train_op)
+    g_train_op = tf.group(*g_train_op)
+    d_train_op = tf.group(*d_train_op)
+    # saver
+    saver = tf.train.Saver(max_to_keep=3)
     model_path = os.path.join(args.model_dir, 'model')
 
     # start session
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
-    config.gpu_options.per_process_gpu_memory_fraction = 0.1
     with tf.Session(config=config) as sess:
-        # sess.run()
+        using_gan = args.gan
+        # summary writer
+        if using_gan:
+            train_summary = tf.summary.merge_all('gan')
+        else:
+            train_summary = tf.summary.merge_all('train')
 
-        try:
-            saver.restore(sess, model_path)
-        except Exception:
+        vaild_summary = tf.summary.merge_all('valid')
+
+        train_writer = tf.summary.FileWriter(os.path.join(args.model_dir, 'train'), sess.graph)
+        vaild_writer = tf.summary.FileWriter(os.path.join(args.model_dir, 'vaild'))
+
+        # train and vaild handle
+        train_handle = sess.run(train_iterator.string_handle())
+        valid_handle = sess.run(valid_iterator.string_handle())
+
+        # resore or initialize weights
+        model_file = tf.train.latest_checkpoint(args.model_dir)
+        if model_file:
+            saver.restore(sess, model_file)
+        else:
             print('initialize parameters')
             init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
             sess.run(init_op)
 
-        # import IPython
-        # IPython.embed()
+        # train dict
+        train_dict = {
+            'global_step': global_step,
+            'g_mse_loss': g_mse_loss,
+            'train_summary': train_summary,
+            'psnr': psnr,
+        }
+        if using_gan:
+            train_dict.update({
+                'g_train_op': g_train_op,
+                'd_train_op': d_train_op,
+            })
+        else:
+            train_dict.update({
+                'p_train_op': p_train_op,
+            })
+        for epoch in range(args.epoch):
 
-        # sess.run(sr_images)
-
-        for epoch in range(40):
-            print("epoch {}".format(epoch))
+            print("epoch {}, using_gan: {}".format(epoch, using_gan))
+            # train
             sess.run(train_iterator.initializer)
             while True:
                 try:
-                    a = sess.run([p_optim, g_mse_loss, tf.shape(lr_images)])
-                    print(a)
-                except OutOfRangeError:
+                    result = sess.run(train_dict, feed_dict={handle: train_handle})
+                    train_writer.add_summary(result['train_summary'], result['global_step'])
+                    print(result['g_mse_loss'], result['psnr'])
+                except tf.errors.OutOfRangeError:
                     break
-            saver.save(sess, model_path, global_step=tf.train.get_global_step())
+            vaild_writer.flush()
+            saver.save(sess, model_path, global_step=global_step)
+
+            # vaildation
+            sess.run(valid_iterator.initializer)
+            while True:
+                try:
+                    result = sess.run({
+                        'g_mse_loss': g_mse_loss,
+                        'vaild_summary': vaild_summary,
+                        'global_step': global_step,
+
+                    }, feed_dict={handle: valid_handle})
+                    vaild_writer.add_summary(result['vaild_summary'], result['global_step'])
+
+                    print('valid', result['g_mse_loss'])
+                except tf.errors.OutOfRangeError:
+                    break
+            vaild_writer.flush()
 
 
 if __name__ == '__main__':
