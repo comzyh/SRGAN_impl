@@ -81,7 +81,7 @@ def main():
     parser.add_argument('--repeat', type=int, default=10, help='train repeat time')
     parser.add_argument('--epoch', type=int, default=100, help='epochs')
     parser.add_argument('--lr', type=float, default=0.00001, help='learning rate')
-    parser.add_argument('--gan', action='store_true', help='using gan')
+    parser.add_argument('--gan', action='store_true', help='using GAN')
 
     args = parser.parse_args()
 
