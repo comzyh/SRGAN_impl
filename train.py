@@ -21,8 +21,8 @@ def parse_record(record):
 
 
 def get_dataset(tfrecord_dir, setname):
-    # filenames = tf.placeholder(tf.string, shape=[None])
-    filenames = [os.path.join(tfrecord_dir, setname)]
+    # filenames = [os.path.join(tfrecord_dir, setname)]
+    filenames = tf.data.TFRecordDataset.list_files(os.path.join(tfrecord_dir, setname + '*'))
     dataset = tf.data.TFRecordDataset(filenames)
 
     dataset = dataset.map(parse_record, num_parallel_calls=8)
