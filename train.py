@@ -2,7 +2,6 @@ import os.path
 import argparse
 import tensorflow as tf
 import numpy as np
-import matplotlib.pyplot as plt
 from tensorflow.python.ops import math_ops
 
 from model import SRResNet
@@ -39,6 +38,7 @@ def get_dataset(tfrecord_dir, setname):
 
 
 def evalue(datapath):
+    import matplotlib.pyplot as plt
     dataset = get_dataset(datapath, 'validation')
     iterator = dataset.make_one_shot_iterator()
     next_element = iterator.get_next()
