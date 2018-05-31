@@ -155,6 +155,8 @@ def main():
     tf.summary.scalar('lr', lr_all, collections=['gan', 'train'])
     tf.summary.scalar('g_gan_loss', g_gan_loss, collections=['gan'])
     tf.summary.scalar('g_loss', g_loss, collections=['gan'])
+    tf.summary.scalar('d_loss_real', g_loss, collections=['gan'])
+    tf.summary.scalar('d_loss_fake', g_loss, collections=['gan'])
     tf.summary.scalar('d_loss', d_loss, collections=['gan'])
 
     # varlist
